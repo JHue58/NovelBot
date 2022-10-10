@@ -37,8 +37,15 @@ novelAI_Url = "https://api.novelai.net/ai/generate-image"
 fanyi_Url = "https://fanyi.youdao.com/translate?&doctype=json&type=ZH_CN2EN&i={}"
 novelAI_Token = ""
 
-# 默认的负面词条
-uc_tags = "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
+# 负面词条枚举 可自定义新枚举值,normal必须要有
+uc_tags = {
+    "nonuse":
+    "",
+    "normal":
+    "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry",
+    "more":
+    "nipple,ugly,duplicate,morbid,mutilated,tranny,trans,trannsexual,hermaphrodite,out of frame,extra fingers,mutated hands,poorly drawn hands,poorly drawn face,mutation,deformed,blurry,bad anatomy,bad proportions,extra limbs,cloned face,disfigured,more than 2 nipples,out of frame,extra limbs,gross proportions,malformed limbs,missing arms,missing legs,extra arms,extra legs,mutated hands,fused fingers,too many fingers,long neck",
+}
 
 # help消息
 help = "\n".join([
@@ -66,14 +73,13 @@ more = "\n".join([
     "height 图片高度(与宽度必须成常见比例)",
     "width 图片宽度(与高度必须成常见比例)",
     "seed 种子(随机int数,用来避免生成重复图片)",
-    "uc 负面词条",
+    "uclevel 负面词条等级(nonuse 不使用,normal 默认,more 更多)",
     "高级超参:",
+    "uc (增加负面词条 值出现空格会被识别为关键字,请用_代替单个词条中空格)",
     "noise 细节噪声(default 0.2)",
     "scale 对tag服从度(default 12)",
     "strength 与原图相似度(0-1 越小越像)",
 ])
-
-
 """ 以下为代码块,请不要随意修改 """
 
 
@@ -203,13 +209,15 @@ class Parameters():
     seed = 0
     steps = 28
     strength = 0.7
-    uc = uc_tags
+    uc = uc_tags['normal']
     ucPreset = 0
     parm = {}
 
     parameters = {}
 
     model = "safe-diffusion"
+    uc_level = "normal"
+    new_uc = ""
     can_translate = True
 
     def __init__(self, switch: str):
@@ -239,6 +247,12 @@ class Parameters():
                 raise ParametersError("错误的超参设置 {}".format(key))
             self.model = '{}-diffusion'.format(value)
             return
+        if key == 'uclevel':
+            if not (value in uc_tags.keys()):
+                raise ParametersError("不存在的负面词条等级枚举 {}".format(key))
+            self.uc = uc_tags[value]
+            self.uc_level = value
+            return
         if key == 't' or key == 'translate':
             if not (value in ['t', 'f', 'true', 'false']):
                 raise ParametersError("错误设置 {}".format(key))
@@ -248,7 +262,6 @@ class Parameters():
                 self.can_translate = False
             return
 
-
         if not (key in self.parameters.keys()):
             raise ParametersError("错误的超参设置 {}".format(key))
         if key == "parm":
@@ -257,14 +270,16 @@ class Parameters():
             value = float(value)
         if key in ["scale", "n_samples", "steps", "seed", "height", "width"]:
             value = int(value)
-        if key=='uc':
-            value = value.replace('，',',')
-            self.parameters[key] = self.parameters[key]+','+value
+        if key == 'uc':
+            value = value.replace('，', ',')
+            self.new_uc = value
         else:
             self.parameters[key] = value
 
     def getParameter(self):
         #print(self.parameters)
+        if self.new_uc != "":
+            self.parameters['uc'] = self.parameters['uc'] + "," + self.new_uc
         return self.parameters
 
     def defaultData(self):
@@ -474,8 +489,10 @@ class Logger():
             "model:{}".format(parm.model),
             "是否调用翻译:{}".format(translate_flag),
             "是否采用图片合成:{}".format(has_image),
+            "负面词条等级:{}".format(parm.uc_level),
             "seed:{}".format(parm.getParameter()['seed']),
             "请求关键字:{}".format(tags),
+            "负面词条:{}".format(parm.new_uc),
             "生成图Hash:{}".format(img_hash),
             "\n",
         ])
@@ -561,21 +578,16 @@ def novelAI(msg, qq, groupID, parm: Parameters):
     }
 
     Header = {
-        "content-type":
-        "application/json",
-        "Content-Length":
-        str(len(json.dumps(data).replace(' ', ''))),
-        "Host":
-        "api.novelai.net",
-        "authorization":
-        novelAI_Token
+        "content-type": "application/json",
+        "Content-Length": str(len(json.dumps(data).replace(' ', ''))),
+        "Host": "api.novelai.net",
+        "authorization": novelAI_Token
     }
-
 
     try:
         res = requests.post(url=novelAI_Url,
-                        headers=Header,
-                        data=json.dumps(data).replace(' ', ''))
+                            headers=Header,
+                            data=json.dumps(data).replace(' ', ''))
         result = res.text
         res = res.text
         res = res.split("\n")
@@ -684,6 +696,11 @@ def reply(qq, groupID, msgID, base64: str, originChain: list, parm: Parameters,
 
     del originChain[0]
 
+    tip_str = '关键字:{}\nseed:{}'.format(tags, parm.parameters['seed'])
+
+    if parm.new_uc != "":
+        tip_str = tip_str + "\n负面词条:{}".format(parm.new_uc)
+
     msg = [{
         'type': 'Quote',
         'senderId': qq,
@@ -694,10 +711,7 @@ def reply(qq, groupID, msgID, base64: str, originChain: list, parm: Parameters,
     }]
     msg.append({'type': 'At', 'target': qq, 'display': ''})
     msg.append({'type': 'Image', 'base64': base64})
-    msg.append({
-        'type': 'Plain',
-        'text': '关键字:{}\nseed:{}'.format(tags, parm.parameters['seed'])
-    })
+    msg.append({'type': 'Plain', 'text': tip_str})
     if 'image' in parm.parameters.keys():
         msg.append({'type': 'Plain', 'text': '\n图源:'})
         msg.append({'type': 'Image', 'base64': parm.parameters['image']})
