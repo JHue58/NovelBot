@@ -29,8 +29,8 @@ command_more = "more"
 command_xp = "xp"
 
 # 私聊管理员的指令 建议不动
-command_add = "/ai add "
-command_remove = "/ai remove "
+command_add = "/ai add "  # 添加开启的群
+command_remove = "/ai remove "  # 移除开启的群
 
 # API设置
 novelAI_Url = "https://api.novelai.net/ai/generate-image"
@@ -46,6 +46,12 @@ uc_tags = {
     "more":
     "nipple,ugly,duplicate,morbid,mutilated,tranny,trans,trannsexual,hermaphrodite,out of frame,extra fingers,mutated hands,poorly drawn hands,poorly drawn face,mutation,deformed,blurry,bad anatomy,bad proportions,extra limbs,cloned face,disfigured,more than 2 nipples,out of frame,extra limbs,gross proportions,malformed limbs,missing arms,missing legs,extra arms,extra legs,mutated hands,fused fingers,too many fingers,long neck",
 }
+
+# 需要admin权限使用的高级参数
+admin_parm = [
+    'model',
+    'steps',
+]
 
 # help消息
 help = "\n".join([
@@ -240,9 +246,10 @@ class Parameters():
         self.parameters['image'] = img_base64
 
     def setParameter(self, key: str, value: str, sender: str):
+        if key in admin_parm and not (setting.hasAdmin(sender)):
+            raise PermissionError("你没有权限修改该参数 {}".format(key))
+
         if key == 'model':
-            if not (setting.hasAdmin(sender)):
-                raise PermissionError("你没有权限修改该参数 {}".format(key))
             if not (value in ['safe', 'nai', 'furry']):
                 raise ParametersError("错误的超参设置 {}".format(key))
             self.model = '{}-diffusion'.format(value)
