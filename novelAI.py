@@ -3,8 +3,10 @@ import hashlib
 import json
 import math
 import os
+import pickle
 import random
 from re import L
+import re
 import time
 import traceback
 import ahocorasick
@@ -24,6 +26,7 @@ zero_cd_member = [1812303545] # 不计算cd的qq号,管理员默认无cd
 a_day_limit = 20 # 每人每日的最大使用次数
 filter_tag = True # 是否进行tag过滤
 img_buffer_max = 10 # 最大图片缓存数
+max_custom = 10 # 最大自定义数据条数
 
 
 # 群聊中的指令
@@ -31,6 +34,10 @@ command = "/ai"
 command_p = "p"
 command_l = "l"
 command_m = "m"
+command_addtag= "at" # 增加自定义数据
+command_rmtag = "rt" # 删除自定义数据
+command_infotag = "it" # 获取自定义数据详情
+command_mytag = "mt" # 查看自己的自定义数据列表
 command_help = "help"
 command_more = "more"
 command_xp = "xp"
@@ -63,6 +70,8 @@ command_add = "/ai add "  # 添加开启的群
 command_remove = "/ai remove "  # 移除开启的群
 command_delete_count = "/ai delete " # 清除某人的当日使用次数
 command_use = "/ai use" # 查询使用情况
+command_addblack = "/ai ban " # 封禁某人
+command_rmblack = "/ai rmban " # 解封某人
 
 # API设置
 novelAI_Url = "https://api.novelai.net/ai/generate-image"
@@ -104,6 +113,10 @@ help = "\n".join([
     "*高级参数输入/ai more查看",
     "*图片也可通过回复的方式传入",
     "/ai xp 查询xp,@群友可查询群友xp", "不同的关键字间用逗号隔开", "专有名词使用-或_连接",
+    "/ai at [名称] [关键字] [(可选)*高级参数] 上传你的自定义tag参数到云端",
+    "/ai it [名称] 查看自定义tag参数详情",
+    "/ai rt [名称] 删除自定义tag参数",
+    "/ai mt 查看你已上传至云端的自定义tag参数名称",
     "{}可增加关键字权重,[]可减少关键字权重", "例如", "生成一张制服少女方形图", "/ai m seifuku,girl",
     "支持中文关键字(通过有道翻译成英文,因此建议使用英文)", 
     "关键字生成器:http://aitag.top",
@@ -120,6 +133,7 @@ more = "\n".join([
     "②生成一张制服少女图(指定seed为123456,scale为18)",
     "/ai p seifuku girl seed=123456 scale=18",
     "常用参数:",
+    "tag 使用云端的自定义tag参数",
     "t/translate 是否开启翻译(默认开启,f/false为关闭)",
     "height 图片高度(64的倍数)",
     "width 图片宽度(64的倍数)",
@@ -141,12 +155,13 @@ sampler = '可用的采样器:k_euler_ancestral(默认),k_euler,k_lms,plms,ddim'
 """ 以下为代码块,请不要随意修改 """
 
 # 版本控制
-version = 6
+version = 7
 
 # 更新广播
 update_msg = "\n".join([
-    "优化help的描述",
-    "为方便手机用户，支持回复已发送的图片进行imgToimg",
+    "新增上传自定义tag与参数",
+    "上传方法请输入/ai help查看",
+    "使用方法请输入/ai more查看",
     "版本未经测试，若出现bug请联系管理员"
 ])
 
@@ -217,6 +232,14 @@ class ParametersError(Exception):
     def __str__(self):
         return self.errorinfo
 
+class UserBanError(Exception):
+    def __init__(self, time_str):
+        super().__init__(self)  # 初始化父类
+        self.errorinfo = f'UserBanError: 你的使用权被封禁,距离解封剩 {time_str}'
+
+    def __str__(self):
+        return self.errorinfo
+
 class KeyWordError(Exception):
     def __init__(self):
         super().__init__(self)  # 初始化父类
@@ -230,7 +253,7 @@ class RequestError(Exception):
     def __init__(self, ErrorInfo):
         super().__init__(self)  # 初始化父类
         if len(ErrorInfo)>500:
-            ErrorInfo = '字符串过长,无法显示'
+            ErrorInfo = '请求错误,来自API的报错,请重新尝试'
         self.errorinfo = 'RequestError: ' + ErrorInfo
 
     def __str__(self):
@@ -372,6 +395,20 @@ class MyThread(Thread):
                     {'type':'Plain','text':f'\n{tr}'}
                 ]
                 CT.Send_Message_Chain(self.groupId,1,msg)
+        except ndb.CustomTagsError as nc:
+            if self.groupId != 0:
+                msg = [
+                    {'type':'At','target':self.sender,'display':''},
+                    {'type':'Plain','text':f'\n{nc}'}
+                ]
+                CT.Send_Message_Chain(self.groupId,1,msg)
+        except UserBanError as us:
+            if self.groupId != 0:
+                msg = [
+                    {'type':'At','target':self.sender,'display':''},
+                    {'type':'Plain','text':f'\n{us}'}
+                ]
+                CT.Send_Message_Chain(self.groupId,1,msg)
         except Exception as e:
             if self.groupId != 0:
                 errorStr = traceback.format_exc()
@@ -405,18 +442,44 @@ class Parameters():
 
     parameters = {}
 
+    input = ""
     model = "safe-diffusion"
     uc_level = "normal"
     new_uc = ""
     can_translate = True
     img2img = False
 
-    def __init__(self, switch: str):
-        sizes = command_to_size[switch]
-        self.width = sizes[0]
-        self.height = sizes[1]
+    def __init__(self, switch: str,addParm=False):
+        if addParm==True:
+            self.width = 0
+            self.height = 0
+            self.defaultData()
+        else:
+            sizes = command_to_size[switch]
+            self.width = sizes[0]
+            self.height = sizes[1]
+            self.seed = getSeed()
+            self.defaultData()
+
+    def getOrigin(self,height,width):
         self.seed = getSeed()
-        self.defaultData()
+        self.parameters['seed'] = self.seed
+        self.parameters['height'] = height
+        self.parameters['width'] = width
+        self.height = height
+        self.width = width
+
+    def __str__(self):
+        send_text = '\n'.join([
+            f'关键字:{self.input}',
+            f'负面词条等级:{self.uc_level}',
+            f'负面词条:{self.new_uc}',
+            f'scale:{self.parameters["scale"]}',
+            f'strength:{self.parameters["strength"]}',
+            f'noise:{self.parameters["noise"]}',
+            f'sampler:{self.parameters["sampler"]}',
+        ])
+        return send_text
 
     def setImageParameter(self, img_url: str):
         res = requests.get(img_url)
@@ -465,7 +528,10 @@ class Parameters():
             value = int(value)
         if key == 'uc':
             value = value.replace('，', ',')
-            self.new_uc = value
+            if self.new_uc=="":
+                self.new_uc = value
+            else:
+                self.new_uc = self.new_uc+f',{value}'
         else:
             self.parameters[key] = value
 
@@ -599,6 +665,17 @@ class config():
     def save(self):
         json.dump(self.setting, open("config.json", 'w', encoding='utf-8'))
 
+    def banUser(self,text,sender):
+        arg = text.split()
+        qq = int(arg[0])
+        time = int(arg[1])
+        ndb.addBlack(qq,time)
+        CT.Send_Message(sender,2,'封禁成功！',1)
+
+    def removeBanUser(self,target,sender):
+        ndb.removeBlack(int(target))
+        CT.Send_Message(sender,2,'解封成功！',1)
+
     def getCommand(self, text, sender):
         if text[:len(command_add)] == command_add:
             self.addGroup(text[len(command_add):], sender)
@@ -608,6 +685,10 @@ class config():
             self.deleteUse(text[len(command_remove):], sender)
         elif text[:len(command_use)] == command_use:
             self.getDayUse(sender)
+        elif text[:len(command_addblack)] == command_addblack:
+            self.banUser(text[len(command_addblack):],sender)
+        elif text[:len(command_rmblack)] == command_rmblack:
+            self.removeBanUser(text[len(command_rmblack):],sender)
         else:
             return None
 
@@ -654,6 +735,15 @@ class commandSender():
                 return 2
             if command_list[1] == command_sampler:
                 return 3
+            if command_list[1] == command_addtag:
+                return 4
+            if command_list[1] == command_rmtag:
+                return 5
+            if command_list[1] == command_infotag:
+                return 6
+            if command_list[1] == command_mytag:
+                return 7
+            
     
             
             return -1
@@ -739,10 +829,10 @@ class Logger():
             with open(new_path, 'wb') as img_file:
                 img_file.write(base64_hex)
 
-    def printLogger(self, tags, command_list, groupID, qq, translate_flag,
+    def printLogger(self, command_list, groupID, qq, translate_flag,
                     parm: Parameters, img_hash: str):
 
-        ndb.insertTagsToDB(qq, tags)
+        ndb.insertTagsToDB(qq, parm.input)
 
         has_image = False
         if 'image' in parm.parameters.keys():
@@ -758,7 +848,7 @@ class Logger():
             "是否采用图片合成:{}".format(has_image),
             "负面词条等级:{}".format(parm.uc_level),
             "seed:{}".format(parm.getParameter()['seed']),
-            "请求关键字:{}".format(tags),
+            "请求关键字:{}".format(parm.input),
             "负面词条:{}".format(parm.new_uc),
             "生成图Hash:{}".format(img_hash),
             "\n",
@@ -789,6 +879,23 @@ def setParameters(command_list: list, parm: Parameters, sender) -> str:
         command_list.remove(value)
 
     return ' '.join(command_list)
+
+def scanfCustomParm(text:str,parm:Parameters):
+    res = re.search('tag=.*? ',text)
+    if res==None:
+        res = re.search('tag=.*?$',text)
+    if res==None:
+        return text,parm
+    res = res.group()
+    text = text.replace(res,'')
+    data = ndb.getCustomTags(res.split('=')[1].strip())
+    parm_b64 = data[0]
+    new_parm:Parameters = pickle.loads(base64.decodebytes(parm_b64.encode()))
+    
+    new_parm.getOrigin(parm.height,parm.width)
+
+    return text,new_parm
+
 
 
 def translate(str):
@@ -850,21 +957,122 @@ def getNeedCount(parm:Parameters):
         return height_will_add+width_will_add+img2img_ma
 
     return height_will_add+width_will_add
-        
+
+
+def addCustomTag(qq,group,msg):
+    parm = Parameters(None,True)
+
+    
+    plain = msg[1]
+
+    tags: str = plain['text']
+    tags = setParameters(tags.split(), parm, qq)
+    tags = ' '.join(tags.split())
+    tags = tags.split(' ', 3)
+    command_list = tags    
+
+    tags: str = tags[3]
+    tags = tags.replace('，', ',')
+    if len(tags) < 4 or tags[3] == "":
+        raise KeyWordError()
+    tags_list = list(filter(None,tags.split(',')))
+
+
+    if parm.can_translate:
+        for i in range(len(tags_list)):
+            if is_contain_chinese(tags_list[i]):
+                tags_list[i] = translate(tags_list[i])
+                
+
+    tags = ','.join(tags_list)
+
+    parm.input = tags
+    
+    parm_b64 = base64.encodebytes(pickle.dumps(parm)).decode()
+
+    ndb.addCustomTags(qq,command_list[2],parm_b64,max_custom)
+    msg = [
+        {'type':'At','target':qq,'display':''},
+        {'type':'Plain','text':f'添加成功！\n自定义数据名称:{command_list[2]}\n{parm}'}
+    ]
+    CT.Send_Message_Chain(group,1,msg)
+
+def hasInBan(qq):
+    ban_time_se = ndb.getBanTime(qq)
+    if ban_time_se==0:
+        return True
+    
+    m, s = divmod(ban_time_se, 60)
+    h, m = divmod(m, 60)
+    time_str = "%02d时%02d分%02d秒" % (h, m, s)
+    raise UserBanError(time_str)
+
+
+    
+    
+
+def removeCustomTag(qq,group,msg):
+    plain = msg[1]
+    command: str = plain['text']
+    command = command.split(' ', 2)
+    name = command[-1]
+    ndb.removeCustomTags(qq,name)
+    msg = [
+        {'type':'At','target':qq,'display':''},
+        {'type':'Plain','text':'\n删除成功！'}
+    ]
+    CT.Send_Message_Chain(group,1,msg)
+
+def getMyCustomTags(qq,group):
+    name_list = ndb.getAllCustomTags(qq)
+    msg = [
+        {'type':'At','target':qq,'display':''}
+    ]
+    if name_list==[]:
+        msg.append({'type':'Plain','text':'\n你还没有添加过自定义数据噢'})
+        CT.Send_Message_Chain(group,1,msg)
+        return
+
+    send_text = '\n你的自定义数据名称如下:'
+    for index in range(len(name_list)):
+        send_text = send_text+f'\n{index+1}. {name_list[index]}'
+    msg.append({'type':'Plain','text':send_text})
+    CT.Send_Message_Chain(group,1,msg)
+    
+
+
+def getCustomTagsInfo(qq,group,msg):
+    plain = msg[1]
+    command: str = plain['text']
+    command = command.split(' ', 2)
+    if len(command)<3:
+        raise ndb.CustomTagsError('名称不能为空')
+    name = command[2]
+    data = ndb.getCustomTags(name)
+    parm_b64 = data[0]
+    creater = data[1]
+    parm:Parameters = pickle.loads(base64.decodebytes(parm_b64.encode()))
+    msg = [
+        {'type':'At','target':qq,'display':''},
+        {'type':'Plain','text':f'\n自定义数据名称:{name}\n创建者:{creater}\n{parm}'}
+    ]
+    CT.Send_Message_Chain(group,1,msg)
 
 
 
 def novelAI(msg, qq, groupID, parm: Parameters):
-
-    for i in msg:
-        if i['type'] == 'Image':
-            parm.setImageParameter(i['url'])
-            break
+    hasInBan(qq)
 
     source = msg[0]
     plain = msg[1]
     msgID = source['id']
     tags: str = plain['text']
+    tags,parm = scanfCustomParm(tags,parm)
+    for i in msg:
+        if i['type'] == 'Image':
+            parm.setImageParameter(i['url'])
+            break
+    
     tags = setParameters(tags.split(), parm, qq)
     tags = ' '.join(tags.split())
     tags = tags.split(' ', 2)
@@ -878,8 +1086,12 @@ def novelAI(msg, qq, groupID, parm: Parameters):
 
 
     
-
-    tags: str = tags[2]
+    has_new_input = True
+    try:
+        tags: str = tags[2]
+    except IndexError:
+        tags = parm.input
+        has_new_input = False
     tags = tags.replace('，', ',')
     tags = setting.FilterTag(qq,tags)
     if len(tags) < 3 or tags[2] == "":
@@ -898,9 +1110,15 @@ def novelAI(msg, qq, groupID, parm: Parameters):
 
     tags = ','.join(tags_list)
 
+    if not(has_new_input):
+        parm.input = tags
+    else:
+        parm.input = parm.input+f',{tags}'
+
+
 
     data = {
-        "input": tags,
+        "input": parm.input,
         "model": parm.model,
         "parameters": parm.getParameter()
     }
@@ -909,7 +1127,7 @@ def novelAI(msg, qq, groupID, parm: Parameters):
         "content-type": "application/json",
         "Content-Length": str(len(json.dumps(data).replace(' ', ''))),
         "Host": "api.novelai.net",
-        "authorization": novelAI_Token
+        "authorization": "Bearer "+novelAI_Token
     }
     result = "获取API回调失败"
     try:
@@ -932,7 +1150,7 @@ def novelAI(msg, qq, groupID, parm: Parameters):
     hash = hash.hexdigest()
 
     log.async_start(func=log.printLogger,
-                    args=(tags, command_list, groupID, qq, translate_flag,
+                    args=(command_list, groupID, qq, translate_flag,
                           parm, hash),
                     groupID=groupID)
 
@@ -947,7 +1165,6 @@ def novelAI(msg, qq, groupID, parm: Parameters):
           base64=base64,
           originChain=msg,
           parm=parm,
-          tags=tags,
           need_count=need_count,
           count=count
           )
@@ -995,11 +1212,11 @@ def errorReply(qq, groupID, cdtime):
 
 
 def reply(qq, groupID, msgID, base64: str, originChain: list, parm: Parameters,
-          tags: str,count:int,need_count:int):
+          count:int,need_count:int):
 
     del originChain[0]
 
-    tip_str = '关键字:{}\nseed:{}'.format(tags, parm.parameters['seed'])
+    tip_str = '关键字:{}\nseed:{}'.format(parm.input, parm.parameters['seed'])
 
     if parm.new_uc != "":
         tip_str = tip_str + "\n负面词条:{}".format(parm.new_uc)
@@ -1097,9 +1314,39 @@ def start():
                             thread = MyThread(target=searchXP,
                                               args=(messagechain, group,
                                                     sender))
+                            thread.setGroupId(group)
+                            thread.setSender(sender)
                             thread.start()
                         elif flag == 3:
                             CT.Send_Message(group,1,sampler,1)
+                        elif flag == 4:
+
+                            thread = MyThread(target=addCustomTag,
+                                              args=(sender,group,messagechain))
+                            thread.setGroupId(group)
+                            thread.setSender(sender)
+                            thread.start()
+                        elif flag == 5:
+
+                            thread = MyThread(target=removeCustomTag,
+                                              args=(sender,group,messagechain))
+                            thread.setGroupId(group)
+                            thread.setSender(sender)
+                            thread.start()
+                        elif flag == 6:
+                            
+                            thread = MyThread(target=getCustomTagsInfo,
+                                              args=(sender,group,messagechain))
+                            thread.setGroupId(group)
+                            thread.setSender(sender)
+                            thread.start()
+                        elif flag == 7:
+                            
+                            thread = MyThread(target=getMyCustomTags,
+                                              args=(sender,group))
+                            thread.setGroupId(group)
+                            thread.setSender(sender)
+                            thread.start()
                         elif flag == -1:
                             raise CommandError()
                         elif flag == None:
@@ -1147,8 +1394,12 @@ def start():
             continue
         except Exception as e:
             errorStr = traceback.format_exc()
-            CT.Send_Message(group, 1, "出现错误,请联系bot主人解决\n{}".format(errorStr),
-                            1)
+            try:
+                CT.Send_Message(group, 1, "出现错误,请联系bot主人解决\n{}".format(errorStr),
+                                1)
+            except:
+                CT.Send_Message(sender, 2, "出现错误,请联系bot主人解决\n{}".format(errorStr),
+                                1)
             com.removeSender(sender)
             print(errorStr)
             continue
