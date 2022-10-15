@@ -5,13 +5,13 @@ import math
 import os
 import pickle
 import random
-from re import L
 import re
 import time
 import traceback
 import ahocorasick
 from io import BytesIO
 from threading import Thread
+import NovelEx.ImgTag as imgt
 
 import requests
 
@@ -31,13 +31,11 @@ max_custom = 10 # 最大自定义数据条数
 
 # 群聊中的指令
 command = "/ai"
-command_p = "p"
-command_l = "l"
-command_m = "m"
 command_addtag= "at" # 增加自定义数据
 command_rmtag = "rt" # 删除自定义数据
 command_infotag = "it" # 获取自定义数据详情
 command_mytag = "mt" # 查看自己的自定义数据列表
+command_gettag= "tag" # 获取图片的tag
 command_help = "help"
 command_more = "more"
 command_xp = "xp"
@@ -113,6 +111,7 @@ help = "\n".join([
     "*高级参数输入/ai more查看",
     "*图片也可通过回复的方式传入",
     "/ai xp 查询xp,@群友可查询群友xp", "不同的关键字间用逗号隔开", "专有名词使用-或_连接",
+    "/ai tag [图片] 分析图片tag",
     "/ai at [名称] [关键字] [(可选)*高级参数] 上传你的自定义tag参数到云端",
     "/ai it [名称] 查看自定义tag参数详情",
     "/ai rt [名称] 删除自定义tag参数",
@@ -155,13 +154,12 @@ sampler = '可用的采样器:k_euler_ancestral(默认),k_euler,k_lms,plms,ddim'
 """ 以下为代码块,请不要随意修改 """
 
 # 版本控制
-version = 7
+version = 8
 
 # 更新广播
 update_msg = "\n".join([
-    "新增上传自定义tag与参数",
-    "上传方法请输入/ai help查看",
-    "使用方法请输入/ai more查看",
+    "新增分析图片tag指令",
+    "/ai tag[图片]",
     "版本未经测试，若出现bug请联系管理员"
 ])
 
@@ -351,62 +349,23 @@ class MyThread(Thread):
         try:
             if self._target:
                 self._target(*self._args, **self._kwargs)
-        except UseMaxError as u:
-            if self.groupId!=0:
+        except (RequestError,ParametersError,PermissionError,UseMaxError,imgt.ImageGetTagError) as r:
+            if self.groupId != 0:
+                errorStr = traceback.format_exc()
                 msg = [
                     {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'\n{u}'}
+                    {'type':'Plain','text':f'出现错误,请联系bot管理员解决\n{r}'}
                 ]
                 CT.Send_Message_Chain(self.groupId,1,msg)
-        except RequestError as r:
-            if self.groupId != 0:
-                errorStr = traceback.format_exc()
-                msg = [
-                    {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'出现错误,请联系bot主人解决\n{r}'}
-                ]
-                CT.Send_Message_Chain(self.groupId,1,msg)
-                print(errorStr)
-        except ParametersError as p:
-            if self.groupId != 0:
-                errorStr = traceback.format_exc()
-                msg = [
-                    {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'出现错误,请联系bot主人解决\n{p}'}
-                ]
-                CT.Send_Message_Chain(self.groupId, 1,msg)
-                print(errorStr)
-        except PermissionError as pe:
-            if self.groupId != 0:
-                errorStr = traceback.format_exc()
-                msg = [
-                    {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'出现错误,请联系bot主人解决\n{pe}'}
-                ]
-                CT.Send_Message_Chain(self.groupId, 1,msg)
                 print(errorStr)
         except KeyWordError as kw:
             if self.groupId != 0:
                 emptyReply(qq=self.sender,groupID=self.groupId)
-        except TranslateError as tr:
+        except (TranslateError,ndb.CustomTagsError,UserBanError) as tr:
             if self.groupId != 0:
                 msg = [
                     {'type':'At','target':self.sender,'display':''},
                     {'type':'Plain','text':f'\n{tr}'}
-                ]
-                CT.Send_Message_Chain(self.groupId,1,msg)
-        except ndb.CustomTagsError as nc:
-            if self.groupId != 0:
-                msg = [
-                    {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'\n{nc}'}
-                ]
-                CT.Send_Message_Chain(self.groupId,1,msg)
-        except UserBanError as us:
-            if self.groupId != 0:
-                msg = [
-                    {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'\n{us}'}
                 ]
                 CT.Send_Message_Chain(self.groupId,1,msg)
         except Exception as e:
@@ -414,7 +373,7 @@ class MyThread(Thread):
                 errorStr = traceback.format_exc()
                 msg = [
                     {'type':'At','target':self.sender,'display':''},
-                    {'type':'Plain','text':f'\n{errorStr}'}
+                    {'type':'Plain','text':f'出现错误,请联系bot主人解决\n{errorStr}'}
                 ]
                 CT.Send_Message_Chain(self.groupId, 1,msg)
                 print(errorStr)
@@ -483,9 +442,7 @@ class Parameters():
         return send_text
 
     def setImageParameter(self, img_url: str):
-        res = requests.get(img_url)
-        img_base64 = base64.b64encode(BytesIO(
-            res.content).read()).decode('utf-8')
+        img_base64 = fromUrlGetImgB64(img_url)
         self.parameters['image'] = img_base64
         self.img2img = True
 
@@ -744,6 +701,8 @@ class commandSender():
                 return 6
             if command_list[1] == command_mytag:
                 return 7
+            if command_list[1] == command_gettag:
+                return 8 
             
     
             
@@ -861,6 +820,12 @@ class Logger():
         file.write(logger)
         file.close()
 
+
+def fromUrlGetImgB64(url:str,encoding=True):
+    image = BytesIO(requests.get(url, stream=True).content)
+    if encoding:
+        image = base64.b64encode(image.read()).decode('utf-8')
+    return image
 
 def setParameters(command_list: list, parm: Parameters, sender) -> str:
 
@@ -1059,6 +1024,28 @@ def getCustomTagsInfo(qq,group,msg):
         {'type':'Plain','text':f'\n自定义数据名称:{name}\n创建者:{creater}\n{parm}'}
     ]
     CT.Send_Message_Chain(group,1,msg)
+
+def getImgTag(qq,group,msg):
+    print(f'[{time.time()}] 获取到分析图片Tag任务')
+    com.dealing.append(qq)
+    img_msg=None
+    for i in msg:
+        if i['type']=='Image':
+            img_msg = i
+    if img_msg==None:
+        raise imgt.ImageGetTagError('请在末尾传入图片或引用图片回复')
+    image = fromUrlGetImgB64(img_msg['url'],encoding=False)
+    tags = imgt.getImgTag(image)
+
+    msg = [
+        {'type':'Image','url':img_msg['url']},
+        {'type':'At','target':qq,'display':''},
+        {'type':'Plain','text':f'\n该图片Tag如下:\n{tags}'}
+    ]
+
+    CT.Send_Message_Chain(group,1,msg)
+    com.removeSender(qq)
+
 
 
 
@@ -1300,6 +1287,13 @@ def searchXP(msg: list, groupID, sender):
     CT.Send_Message_Chain(groupID, 1, xp_chain)
 
 
+def runAsync(sender,group,func,args:tuple):
+    thread = MyThread(target=func,args=args)
+    thread.setSender(sender)
+    thread.setGroupId(group)
+    thread.start()
+
+
 def start():
     while True:
         try:
@@ -1331,42 +1325,20 @@ def start():
                         elif flag == 1:
                             CT.Send_Message(group, 1, more, 1)
                         elif flag == 2:
-                            thread = MyThread(target=searchXP,
-                                              args=(messagechain, group,
-                                                    sender))
-                            thread.setGroupId(group)
-                            thread.setSender(sender)
-                            thread.start()
+                            runAsync(sender,group,searchXP,(messagechain,group,sender))
                         elif flag == 3:
                             CT.Send_Message(group,1,sampler,1)
                         elif flag == 4:
-
-                            thread = MyThread(target=addCustomTag,
-                                              args=(sender,group,messagechain))
-                            thread.setGroupId(group)
-                            thread.setSender(sender)
-                            thread.start()
+                            runAsync(sender,group,addCustomTag,(sender,group,messagechain))
                         elif flag == 5:
-
-                            thread = MyThread(target=removeCustomTag,
-                                              args=(sender,group,messagechain))
-                            thread.setGroupId(group)
-                            thread.setSender(sender)
-                            thread.start()
+                            runAsync(sender,group,removeCustomTag,(sender,group,messagechain))
                         elif flag == 6:
-                            
-                            thread = MyThread(target=getCustomTagsInfo,
-                                              args=(sender,group,messagechain))
-                            thread.setGroupId(group)
-                            thread.setSender(sender)
-                            thread.start()
+                            runAsync(sender,group,getCustomTagsInfo,(sender,group,messagechain))
                         elif flag == 7:
-                            
-                            thread = MyThread(target=getMyCustomTags,
-                                              args=(sender,group))
-                            thread.setGroupId(group)
-                            thread.setSender(sender)
-                            thread.start()
+                            runAsync(sender,group,getMyCustomTags,(sender,group))
+                        elif flag == 8:
+                            if com.canTarget(sender, group):
+                                runAsync(sender,group,getImgTag,(sender,group,messagechain))
                         elif flag == -1:
                             raise CommandError()
                         elif flag == None:
