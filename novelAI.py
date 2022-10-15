@@ -468,6 +468,7 @@ class Parameters():
         self.parameters['width'] = width
         self.height = height
         self.width = width
+        return self.new_uc
 
     def __str__(self):
         send_text = '\n'.join([
@@ -885,16 +886,17 @@ def scanfCustomParm(text:str,parm:Parameters):
     if res==None:
         res = re.search('tag=.*?$',text)
     if res==None:
-        return text,parm
+        return text,parm,None,None
     res = res.group()
     text = text.replace(res,'')
-    data = ndb.getCustomTags(res.split('=')[1].strip())
+    name = res.split('=')[1].strip()
+    data = ndb.getCustomTags(name)
     parm_b64 = data[0]
     new_parm:Parameters = pickle.loads(base64.decodebytes(parm_b64.encode()))
     
-    new_parm.getOrigin(parm.height,parm.width)
+    origin_uc = new_parm.getOrigin(parm.height,parm.width)
 
-    return text,new_parm
+    return text,new_parm,origin_uc,name
 
 
 
@@ -1067,7 +1069,7 @@ def novelAI(msg, qq, groupID, parm: Parameters):
     plain = msg[1]
     msgID = source['id']
     tags: str = plain['text']
-    tags,parm = scanfCustomParm(tags,parm)
+    tags,parm,origin_uc,custom_name = scanfCustomParm(tags,parm)
     for i in msg:
         if i['type'] == 'Image':
             parm.setImageParameter(i['url'])
@@ -1169,7 +1171,10 @@ def novelAI(msg, qq, groupID, parm: Parameters):
           originChain=msg,
           parm=parm,
           need_count=need_count,
-          count=count
+          count=count,
+          custom_name=custom_name,
+          new_tags=tags,
+          origin_uc=origin_uc
           )
 
     ndb.addUseCount(qq,need_count)
@@ -1215,14 +1220,26 @@ def errorReply(qq, groupID, cdtime):
 
 
 def reply(qq, groupID, msgID, base64: str, originChain: list, parm: Parameters,
-          count:int,need_count:int):
+          count:int,need_count:int,custom_name,new_tags,origin_uc):
 
     del originChain[0]
 
-    tip_str = '关键字:{}\nseed:{}'.format(parm.input, parm.parameters['seed'])
+    if custom_name!=None:
+        tip_str = f'引用的自定义数据名称:{custom_name}\n'
+        if new_tags!=parm.input:
+            tip_str = f'{tip_str}新增关键字:{new_tags}\n'
+        new_uc = parm.new_uc.replace(origin_uc,'').strip(',')
+        if new_uc!="":
+            tip_str = f'{tip_str}新增负面词条:{new_uc}\n'
+        
+    else:
+        tip_str = f'关键字:{parm.input}\n'
+        if parm.new_uc != "":
+            tip_str = f'{tip_str}负面词条:{parm.new_uc}\n'
 
-    if parm.new_uc != "":
-        tip_str = tip_str + "\n负面词条:{}".format(parm.new_uc)
+    
+    tip_str = f'{tip_str}seed:{parm.parameters["seed"]}'
+    
 
     msg = [{
         'type': 'Quote',
