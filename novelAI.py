@@ -22,7 +22,7 @@ import simuse
 saveImg = True  # 是否保存生成的图片到本地   True:是 / False:否
 max_task = 10  # 同时处理的最大任务数量
 cd = 60  # 冷却时间  秒
-zero_cd_member = [1812303545] # 不计算cd的qq号,管理员默认无cd
+zero_cd_member = [] # 不计算cd的qq号,管理员默认无cd
 a_day_limit = 20 # 每人每日的最大使用次数
 filter_tag = True # 是否进行tag过滤
 img_buffer_max = 10 # 最大图片缓存数
@@ -1113,7 +1113,10 @@ def novelAI(msg, qq, groupID, parm: Parameters):
     if not(has_new_input):
         parm.input = tags
     else:
-        parm.input = parm.input+f',{tags}'
+        if parm.input=="":
+            parm.input = tags
+        else:
+            parm.input = f'{tags},{parm.input}'
 
 
 
